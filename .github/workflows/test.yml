@@ -1,0 +1,908 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: finance_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+        continue-on-error: true
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Generate Prisma Client
+        working-directory: ./backend
+        run: npx prisma generate
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/finance_test
+
+      - name: Run database migrations
+        working-directory: ./backend
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/finance_test
+
+      - name: Run tests with coverage
+        working-directory: ./backend
+        id: test
+        run: npm run test:coverage
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/finance_test
+          JWT_SECRET: test-secret-key-for-ci
+          JWT_EXPIRES_IN: 7d
+          CORS_ORIGIN: http://localhost:3000
+
+      - name: Extract coverage summary
+        working-directory: ./backend
+        id: coverage
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            COVERAGE=$(node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8')); console.log(JSON.stringify({statements: data.total.statements.pct, branches: data.total.branches.pct, functions: data.total.functions.pct, lines: data.total.lines.pct}))")
+            echo "coverage<<EOF" >> $GITHUB_OUTPUT
+            echo "$COVERAGE" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Display backend coverage summary
+        working-directory: ./backend
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            echo "## Backend Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Coverage |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|----------|" >> $GITHUB_STEP_SUMMARY
+            node -e "
+              const fs = require('fs');
+              const data = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8'));
+              const total = data.total;
+              const formatPct = (pct) => {
+                const pctStr = pct.toFixed(2) + '%';
+                const filled = Math.round(pct / 5);
+                const empty = 20 - filled;
+                const bar = '#'.repeat(filled) + '-'.repeat(empty);
+                return pctStr + ' ' + bar;
+              };
+              console.log('| Statements | ' + formatPct(total.statements.pct) + ' |');
+              console.log('| Branches | ' + formatPct(total.branches.pct) + ' |');
+              console.log('| Functions | ' + formatPct(total.functions.pct) + ' |');
+              console.log('| Lines | ' + formatPct(total.lines.pct) + ' |');
+            " >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Full coverage report available in artifacts" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Backend coverage summary not found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run frontend tests with coverage
+        working-directory: ./frontend
+        id: frontend-test
+        run: npm run test:coverage
+        env:
+          NODE_ENV: test
+
+      - name: Extract frontend coverage summary
+        working-directory: ./frontend
+        id: frontend-coverage
+        run: |
+          echo "Checking for frontend coverage files..."
+          if [ -d coverage ]; then
+            echo "Coverage directory exists"
+            ls -la coverage/ || echo "Could not list coverage directory"
+            echo "Looking for coverage JSON files..."
+            find coverage -name "*.json" -type f 2>/dev/null | head -20 || echo "No JSON files found"
+          else
+            echo "Coverage directory does not exist"
+          fi
+          
+          # Try multiple possible filenames
+          COVERAGE_FILE=""
+          for file in coverage/coverage-summary.json coverage/coverage-final.json coverage/coverage.json; do
+            if [ -f "$file" ]; then
+              echo "Found coverage file: $file"
+              COVERAGE_FILE="$file"
+              break
+            fi
+          done
+          
+          if [ -n "$COVERAGE_FILE" ]; then
+            # Check file structure
+            echo "Coverage file structure (first 20 lines):"
+            head -20 "$COVERAGE_FILE" || echo "Could not read file"
+            
+            # Try to extract coverage data
+            COVERAGE=$(node -e "
+              const fs = require('fs');
+              const data = JSON.parse(fs.readFileSync('$COVERAGE_FILE', 'utf8'));
+              // Handle both coverage-summary.json format and coverage-final.json format
+              let total;
+              if (data.total) {
+                total = data.total;
+              } else {
+                // coverage-final.json format - calculate totals
+                const files = Object.values(data);
+                total = {
+                  statements: { total: 0, covered: 0, pct: 0 },
+                  branches: { total: 0, covered: 0, pct: 0 },
+                  functions: { total: 0, covered: 0, pct: 0 },
+                  lines: { total: 0, covered: 0, pct: 0 }
+                };
+                files.forEach(file => {
+                  if (file && file.s) {
+                    total.statements.total += Object.keys(file.s || {}).length;
+                    total.statements.covered += Object.values(file.s || {}).filter(v => v > 0).length;
+                    total.branches.total += Object.keys(file.b || {}).length;
+                    total.branches.covered += Object.values(file.b || {}).filter(v => v && v.length > 0 && v.some(h => h > 0)).length;
+                    total.functions.total += Object.keys(file.f || {}).length;
+                    total.functions.covered += Object.values(file.f || {}).filter(v => v > 0).length;
+                    total.lines.total += Object.keys(file.statementMap || {}).length;
+                    total.lines.covered += Object.values(file.s || {}).filter(v => v > 0).length;
+                  }
+                });
+                total.statements.pct = total.statements.total > 0 ? (total.statements.covered / total.statements.total) * 100 : 0;
+                total.branches.pct = total.branches.total > 0 ? (total.branches.covered / total.branches.total) * 100 : 0;
+                total.functions.pct = total.functions.total > 0 ? (total.functions.covered / total.functions.total) * 100 : 0;
+                total.lines.pct = total.lines.total > 0 ? (total.lines.covered / total.lines.total) * 100 : 0;
+              }
+              console.log(JSON.stringify({
+                statements: total.statements.pct,
+                branches: total.branches.pct,
+                functions: total.functions.pct,
+                lines: total.lines.pct
+              }));
+            " 2>&1) || COVERAGE=""
+            
+            if [ -n "$COVERAGE" ] && [ "$COVERAGE" != "null" ]; then
+              echo "coverage<<EOF" >> $GITHUB_OUTPUT
+              echo "$COVERAGE" >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+            else
+              echo "Could not extract coverage data from $COVERAGE_FILE"
+            fi
+          else
+            echo "No coverage JSON file found"
+            echo "Looking for any coverage files..."
+            find . -name "*coverage*" -type f 2>/dev/null | head -10 || echo "No coverage files found"
+          fi
+
+      - name: Display frontend coverage summary
+        working-directory: ./frontend
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            echo "## Frontend Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Coverage |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|----------|" >> $GITHUB_STEP_SUMMARY
+            node -e "
+              const fs = require('fs');
+              const data = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8'));
+              const total = data.total;
+              const formatPct = (pct) => {
+                const pctStr = pct.toFixed(2) + '%';
+                const filled = Math.round(pct / 5);
+                const empty = 20 - filled;
+                const bar = '#'.repeat(filled) + '-'.repeat(empty);
+                return pctStr + ' ' + bar;
+              };
+              console.log('| Statements | ' + formatPct(total.statements.pct) + ' |');
+              console.log('| Branches | ' + formatPct(total.branches.pct) + ' |');
+              console.log('| Functions | ' + formatPct(total.functions.pct) + ' |');
+              console.log('| Lines | ' + formatPct(total.lines.pct) + ' |');
+            " >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Full coverage report available in artifacts" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Frontend coverage summary not found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v3
+        with:
+          files: |
+            ./backend/coverage/lcov.info
+            ./frontend/coverage/lcov.info
+          flags: |
+            backend
+            frontend
+          name: coverage
+          fail_ci_if_error: false
+
+      - name: Get changed files
+        if: github.event_name == 'pull_request'
+        id: changed-files
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            
+            const changedFiles = files
+              .filter(file => file.filename.endsWith('.ts') || file.filename.endsWith('.js') || file.filename.endsWith('.tsx') || file.filename.endsWith('.jsx'))
+              .map(file => file.filename)
+              .filter(file => !file.includes('__tests__') && !file.includes('.test.') && !file.includes('.spec.'));
+            
+            const output = changedFiles.join('\n');
+            console.log('Changed files:', changedFiles);
+            return output;
+
+      - name: Comment PR with coverage
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            const backendCoveragePath = path.join(process.cwd(), 'backend', 'coverage', 'coverage-summary.json');
+            const frontendCoveragePath = path.join(process.cwd(), 'frontend', 'coverage', 'coverage-summary.json');
+            
+            // Debug: Check file existence and list directories
+            console.log('Current working directory:', process.cwd());
+            console.log('Backend coverage path:', backendCoveragePath);
+            console.log('Frontend coverage path:', frontendCoveragePath);
+            console.log('Backend coverage exists:', fs.existsSync(backendCoveragePath));
+            console.log('Frontend coverage exists:', fs.existsSync(frontendCoveragePath));
+            
+            // List frontend coverage directory if it exists
+            const frontendCoverageDir = path.join(process.cwd(), 'frontend', 'coverage');
+            if (fs.existsSync(frontendCoverageDir)) {
+              console.log('Frontend coverage directory exists');
+              try {
+                const files = fs.readdirSync(frontendCoverageDir);
+                console.log('Files in frontend/coverage:', files);
+              } catch (e) {
+                console.log('Error reading frontend coverage directory:', e.message);
+              }
+            } else {
+              console.log('Frontend coverage directory does not exist');
+            }
+            
+            let backendData = null;
+            let frontendData = null;
+            
+            if (fs.existsSync(backendCoveragePath)) {
+              backendData = JSON.parse(fs.readFileSync(backendCoveragePath, 'utf8'));
+              console.log('Backend data loaded successfully');
+            } else {
+              console.log('Backend coverage file not found');
+            }
+            
+            if (fs.existsSync(frontendCoveragePath)) {
+              try {
+                frontendData = JSON.parse(fs.readFileSync(frontendCoveragePath, 'utf8'));
+                console.log('Frontend data loaded successfully from:', frontendCoveragePath);
+              } catch (e) {
+                console.log('Error parsing frontend coverage file:', e.message);
+              }
+            } else {
+              console.log('Frontend coverage file not found at:', frontendCoveragePath);
+              // Try alternative paths and filenames
+              const altPaths = [
+                path.join(process.cwd(), 'frontend', 'coverage', 'coverage-summary.json'),
+                path.join(process.cwd(), 'frontend', 'coverage', 'coverage-final.json'),
+                path.join(process.cwd(), 'frontend', 'coverage', 'coverage.json'),
+                path.join(process.cwd(), 'frontend', 'coverage', 'summary.json'),
+              ];
+              
+              for (const altPath of altPaths) {
+                if (fs.existsSync(altPath)) {
+                  console.log('Found frontend coverage at alternative path:', altPath);
+                  try {
+                    const rawData = JSON.parse(fs.readFileSync(altPath, 'utf8'));
+                    // If it's coverage-final.json format, we need to convert it
+                    if (rawData.total) {
+                      frontendData = rawData;
+                    } else {
+                      // Convert coverage-final.json to coverage-summary.json format
+                      // This is a simplified conversion - you may need to adjust
+                      console.log('Converting coverage-final.json format to summary format');
+                      const files = Object.values(rawData);
+                      const totals = {
+                        statements: { total: 0, covered: 0 },
+                        branches: { total: 0, covered: 0 },
+                        functions: { total: 0, covered: 0 },
+                        lines: { total: 0, covered: 0 }
+                      };
+                      
+                      files.forEach(file => {
+                        if (file && file.s) {
+                          totals.statements.total += Object.keys(file.s || {}).length;
+                          totals.statements.covered += Object.values(file.s || {}).filter(v => v > 0).length;
+                          totals.branches.total += Object.keys(file.b || {}).length;
+                          totals.branches.covered += Object.values(file.b || {}).filter(v => v && Array.isArray(v) && v.some(h => h > 0)).length;
+                          totals.functions.total += Object.keys(file.f || {}).length;
+                          totals.functions.covered += Object.values(file.f || {}).filter(v => v > 0).length;
+                          totals.lines.total += Object.keys(file.statementMap || {}).length;
+                          totals.lines.covered += Object.values(file.s || {}).filter(v => v > 0).length;
+                        }
+                      });
+                      
+                      frontendData = {
+                        total: {
+                          statements: {
+                            ...totals.statements,
+                            pct: totals.statements.total > 0 ? (totals.statements.covered / totals.statements.total) * 100 : 0
+                          },
+                          branches: {
+                            ...totals.branches,
+                            pct: totals.branches.total > 0 ? (totals.branches.covered / totals.branches.total) * 100 : 0
+                          },
+                          functions: {
+                            ...totals.functions,
+                            pct: totals.functions.total > 0 ? (totals.functions.covered / totals.functions.total) * 100 : 0
+                          },
+                          lines: {
+                            ...totals.lines,
+                            pct: totals.lines.total > 0 ? (totals.lines.covered / totals.lines.total) * 100 : 0
+                          }
+                        }
+                      };
+                    }
+                    break;
+                  } catch (e) {
+                    console.log('Error parsing alternative coverage file:', e.message);
+                  }
+                }
+              }
+              
+              if (!frontendData) {
+                // List all JSON files in coverage directory
+                const coverageDir = path.join(process.cwd(), 'frontend', 'coverage');
+                if (fs.existsSync(coverageDir)) {
+                  try {
+                    const files = fs.readdirSync(coverageDir);
+                    const jsonFiles = files.filter(f => f.endsWith('.json'));
+                    console.log('JSON files in frontend/coverage:', jsonFiles);
+                    if (jsonFiles.length > 0) {
+                      console.log('Attempting to read first JSON file:', jsonFiles[0]);
+                      const firstFile = path.join(coverageDir, jsonFiles[0]);
+                      const content = fs.readFileSync(firstFile, 'utf8');
+                      console.log('First 500 chars of file:', content.substring(0, 500));
+                    }
+                  } catch (e) {
+                    console.log('Error listing coverage directory:', e.message);
+                  }
+                }
+              }
+            }
+            
+            if (!backendData && !frontendData) {
+              console.log('No coverage summaries found, skipping comment');
+              return;
+            }
+            
+            const backendTotal = backendData ? backendData.total : null;
+            const frontendTotal = frontendData ? frontendData.total : null;
+            
+            // Get changed files
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            
+            const changedFiles = files
+              .filter(file => file.filename.endsWith('.ts') || file.filename.endsWith('.js') || file.filename.endsWith('.tsx') || file.filename.endsWith('.jsx'))
+              .map(file => file.filename)
+              .filter(file => !file.includes('__tests__') && !file.includes('.test.') && !file.includes('.spec.'));
+            
+            const formatPct = (pct) => {
+              if (pct === null || pct === undefined) return 'N/A';
+              const pctStr = pct.toFixed(2) + '%';
+              const filled = Math.round(pct / 5);
+              const empty = 20 - filled;
+              const bar = '#'.repeat(filled) + '-'.repeat(empty);
+              return pctStr + ' ' + bar;
+            };
+            
+            // Build comment
+            let comment = `## Test Coverage Summary\n\n`;
+            
+            // Helper function to find coverage for a file
+            const findFileCoverage = (filePath, coverageData) => {
+              if (!coverageData) return null;
+              
+              // Normalize paths - remove leading slashes and common prefixes
+              const normalizePath = (path) => {
+                return path.replace(/^\.\//, '').replace(/^\//, '');
+              };
+              
+              const normalizedFilePath = normalizePath(filePath);
+                  
+                  // Try exact match first
+              let coverageKey = Object.keys(coverageData).find(key => {
+                const normalizedKey = normalizePath(key);
+                return normalizedKey === normalizedFilePath || 
+                       normalizedKey.endsWith(normalizedFilePath) ||
+                       normalizedFilePath.endsWith(normalizedKey);
+              });
+                  
+                  // If no exact match, try matching by filename and directory structure
+                  if (!coverageKey) {
+                const fileName = normalizedFilePath.split('/').pop();
+                    const fileBaseName = fileName.replace(/\.(ts|js|tsx|jsx)$/, '');
+                const dirPath = normalizedFilePath.substring(0, normalizedFilePath.lastIndexOf('/'));
+                    
+                coverageKey = Object.keys(coverageData).find(key => {
+                  const normalizedKey = normalizePath(key);
+                  const keyFileName = normalizedKey.split('/').pop();
+                      const keyBaseName = keyFileName.replace(/\.(ts|js|tsx|jsx)$/, '');
+                  const keyDirPath = normalizedKey.substring(0, normalizedKey.lastIndexOf('/'));
+                      
+                  // Match by filename
+                      if (keyBaseName === fileBaseName) {
+                    // Try to match directory paths
+                    if (dirPath && keyDirPath) {
+                        return keyDirPath.endsWith(dirPath) || 
+                               dirPath.endsWith(keyDirPath) ||
+                             keyDirPath.includes(dirPath) ||
+                               dirPath.includes(keyDirPath);
+                    }
+                    // If no directory path, just match by filename
+                    return true;
+                      }
+                      return false;
+                    });
+                  }
+                  
+              return coverageKey ? coverageData[coverageKey] : null;
+            };
+            
+            // Calculate coverage for changed files (separate backend and frontend)
+            const backendChangedFiles = changedFiles.filter(f => f.startsWith('backend/'));
+            const frontendChangedFiles = changedFiles.filter(f => f.startsWith('frontend/'));
+            
+            let backendChangedFilesCoverage = null;
+            let frontendChangedFilesCoverage = null;
+            const backendChangedFilesWithCoverage = [];
+            const frontendChangedFilesWithCoverage = [];
+            
+            // Backend changed files coverage
+            if (backendChangedFiles.length > 0 && backendData) {
+              const changedFilesData = backendChangedFiles
+                .map(file => {
+                  const normalizedPath = file.replace('backend/', '');
+                  const coverage = findFileCoverage(normalizedPath, backendData);
+                  
+                  if (coverage) {
+                    backendChangedFilesWithCoverage.push({ file, coverage });
+                    return coverage;
+                  }
+                  
+                  backendChangedFilesWithCoverage.push({ file, coverage: null });
+                  return null;
+                })
+                .filter(Boolean);
+              
+              if (changedFilesData.length > 0) {
+                const totals = changedFilesData.reduce((acc, file) => {
+                  acc.statements.total += file.statements.total || 0;
+                  acc.statements.covered += file.statements.covered || 0;
+                  acc.branches.total += file.branches.total || 0;
+                  acc.branches.covered += file.branches.covered || 0;
+                  acc.functions.total += file.functions.total || 0;
+                  acc.functions.covered += file.functions.covered || 0;
+                  acc.lines.total += file.lines.total || 0;
+                  acc.lines.covered += file.lines.covered || 0;
+                  return acc;
+                }, {
+                  statements: { total: 0, covered: 0 },
+                  branches: { total: 0, covered: 0 },
+                  functions: { total: 0, covered: 0 },
+                  lines: { total: 0, covered: 0 }
+                });
+                
+                backendChangedFilesCoverage = {
+                  statements: { pct: totals.statements.total > 0 ? (totals.statements.covered / totals.statements.total) * 100 : 0 },
+                  branches: { pct: totals.branches.total > 0 ? (totals.branches.covered / totals.branches.total) * 100 : 0 },
+                  functions: { pct: totals.functions.total > 0 ? (totals.functions.covered / totals.functions.total) * 100 : 0 },
+                  lines: { pct: totals.lines.total > 0 ? (totals.lines.covered / totals.lines.total) * 100 : 0 }
+                };
+              }
+            }
+            
+            // Frontend changed files coverage
+            if (frontendChangedFiles.length > 0 && frontendData) {
+              const changedFilesData = frontendChangedFiles
+                .map(file => {
+                  const normalizedPath = file.replace('frontend/', '');
+                  const coverage = findFileCoverage(normalizedPath, frontendData);
+                  
+                  if (coverage) {
+                    frontendChangedFilesWithCoverage.push({ file, coverage });
+                    return coverage;
+                  }
+                  
+                  frontendChangedFilesWithCoverage.push({ file, coverage: null });
+                  return null;
+                })
+                .filter(Boolean);
+              
+              if (changedFilesData.length > 0) {
+                const totals = changedFilesData.reduce((acc, file) => {
+                  acc.statements.total += file.statements.total || 0;
+                  acc.statements.covered += file.statements.covered || 0;
+                  acc.branches.total += file.branches.total || 0;
+                  acc.branches.covered += file.branches.covered || 0;
+                  acc.functions.total += file.functions.total || 0;
+                  acc.functions.covered += file.functions.covered || 0;
+                  acc.lines.total += file.lines.total || 0;
+                  acc.lines.covered += file.lines.covered || 0;
+                  return acc;
+                }, {
+                  statements: { total: 0, covered: 0 },
+                  branches: { total: 0, covered: 0 },
+                  functions: { total: 0, covered: 0 },
+                  lines: { total: 0, covered: 0 }
+                });
+                
+                frontendChangedFilesCoverage = {
+                  statements: { pct: totals.statements.total > 0 ? (totals.statements.covered / totals.statements.total) * 100 : 0 },
+                  branches: { pct: totals.branches.total > 0 ? (totals.branches.covered / totals.branches.total) * 100 : 0 },
+                  functions: { pct: totals.functions.total > 0 ? (totals.functions.covered / totals.functions.total) * 100 : 0 },
+                  lines: { pct: totals.lines.total > 0 ? (totals.lines.covered / totals.lines.total) * 100 : 0 }
+                };
+              }
+            }
+            
+            // Changed Files Coverage
+            if ((backendChangedFilesCoverage && backendChangedFiles.length > 0) || 
+                (frontendChangedFilesCoverage && frontendChangedFiles.length > 0)) {
+              comment += `### Changed Files Coverage\n\n`;
+              
+              if (backendChangedFilesCoverage && backendChangedFiles.length > 0) {
+                comment += `#### Backend Changed Files (${backendChangedFiles.length} file${backendChangedFiles.length > 1 ? 's' : ''})\n\n`;
+                comment += `| Metric | Coverage |\n`;
+                comment += `|--------|----------|\n`;
+                comment += `| Statements | ${formatPct(backendChangedFilesCoverage.statements.pct)} |\n`;
+                comment += `| Branches | ${formatPct(backendChangedFilesCoverage.branches.pct)} |\n`;
+                comment += `| Functions | ${formatPct(backendChangedFilesCoverage.functions.pct)} |\n`;
+                comment += `| Lines | ${formatPct(backendChangedFilesCoverage.lines.pct)} |\n\n`;
+                
+                if (backendChangedFilesWithCoverage.length > 0 && backendChangedFilesWithCoverage.length <= 15) {
+                  comment += `<details>\n<summary>Backend changed files coverage</summary>\n\n`;
+                  backendChangedFilesWithCoverage.forEach(({ file, coverage }) => {
+                    if (coverage) {
+                      comment += `- \`${file}\`: ${coverage.lines.pct.toFixed(2)}% lines, ${coverage.statements.pct.toFixed(2)}% statements, ${coverage.branches.pct.toFixed(2)}% branches\n`;
+                    } else {
+                      comment += `- \`${file}\`: No coverage data\n`;
+                    }
+                  });
+                  comment += `\n</details>\n\n`;
+                }
+              }
+              
+              if (frontendChangedFilesCoverage && frontendChangedFiles.length > 0) {
+                comment += `#### Frontend Changed Files (${frontendChangedFiles.length} file${frontendChangedFiles.length > 1 ? 's' : ''})\n\n`;
+              comment += `| Metric | Coverage |\n`;
+              comment += `|--------|----------|\n`;
+                comment += `| Statements | ${formatPct(frontendChangedFilesCoverage.statements.pct)} |\n`;
+                comment += `| Branches | ${formatPct(frontendChangedFilesCoverage.branches.pct)} |\n`;
+                comment += `| Functions | ${formatPct(frontendChangedFilesCoverage.functions.pct)} |\n`;
+                comment += `| Lines | ${formatPct(frontendChangedFilesCoverage.lines.pct)} |\n\n`;
+                
+                if (frontendChangedFilesWithCoverage.length > 0 && frontendChangedFilesWithCoverage.length <= 15) {
+                  comment += `<details>\n<summary>Frontend changed files coverage</summary>\n\n`;
+                  frontendChangedFilesWithCoverage.forEach(({ file, coverage }) => {
+                  if (coverage) {
+                    comment += `- \`${file}\`: ${coverage.lines.pct.toFixed(2)}% lines, ${coverage.statements.pct.toFixed(2)}% statements, ${coverage.branches.pct.toFixed(2)}% branches\n`;
+                  } else {
+                      comment += `- \`${file}\`: No coverage data\n`;
+                  }
+                });
+                comment += `\n</details>\n\n`;
+                }
+              }
+            }
+            
+            // Coverage by Source File
+            const getSourceFilesCoverage = (data, prefix) => {
+              if (!data) return [];
+              
+              // Normalize path - handle absolute paths, paths with prefix, etc.
+              const normalizeCoveragePath = (key, prefix) => {
+                // Remove absolute path prefixes if present
+                let normalized = key.replace(/^.*\/frontend\//, '').replace(/^.*\/backend\//, '');
+                // Remove leading slashes
+                normalized = normalized.replace(/^\//, '');
+                
+                // If path already starts with prefix, don't add it again
+                if (prefix && !normalized.startsWith(prefix + '/')) {
+                  return `${prefix}/${normalized}`;
+                }
+                return normalized;
+              };
+              
+              const sourceFiles = Object.keys(data).filter(key => 
+                key !== 'total' && 
+                !key.includes('__tests__') && 
+                !key.includes('.test.') && 
+                !key.includes('.spec.') &&
+                !key.includes('test/') &&
+                !key.includes('setup.ts') &&
+                !key.includes('node_modules')
+              );
+              
+              return sourceFiles.map(key => {
+                const fileData = data[key];
+                if (fileData && fileData.lines && fileData.lines.total > 0) {
+                  return {
+                    path: normalizeCoveragePath(key, prefix),
+                    lines: fileData.lines,
+                    statements: fileData.statements,
+                    branches: fileData.branches,
+                    functions: fileData.functions
+                  };
+                }
+                return null;
+              }).filter(Boolean);
+            };
+            
+            const backendSourceFilesCoverage = getSourceFilesCoverage(backendData, 'backend');
+            const frontendSourceFilesCoverage = getSourceFilesCoverage(frontendData, 'frontend');
+            
+            // Debug logging
+            console.log('Backend source files count:', backendSourceFilesCoverage.length);
+            console.log('Frontend source files count:', frontendSourceFilesCoverage.length);
+            if (frontendData) {
+              const allKeys = Object.keys(frontendData);
+              console.log('Frontend data total keys:', allKeys.length);
+              console.log('Frontend data keys (first 20):', allKeys.slice(0, 20));
+              console.log('Frontend total:', frontendData.total);
+              // Show sample of filtered keys
+              const filteredKeys = allKeys.filter(key => 
+                key !== 'total' && 
+                !key.includes('__tests__') && 
+                !key.includes('.test.') && 
+                !key.includes('.spec.') &&
+                !key.includes('test/') &&
+                !key.includes('setup.ts') &&
+                !key.includes('node_modules')
+              );
+              console.log('Frontend filtered keys count:', filteredKeys.length);
+              console.log('Frontend filtered keys (first 10):', filteredKeys.slice(0, 10));
+            } else {
+              console.log('Frontend data is null or undefined');
+            }
+            
+            // Helper to get file modification dates using git
+            const getFileModificationDates = (filePaths) => {
+              const { execSync } = require('child_process');
+              const dates = {};
+              
+              for (const filePath of filePaths) {
+                try {
+                  // Get the last modification date for the file (unix timestamp)
+                  // Path is already relative to repo root (e.g., "backend/src/...")
+                  const result = execSync(`git log -1 --format=%ct -- "${filePath}" 2>/dev/null || echo 0`, { 
+                    encoding: 'utf8',
+                    cwd: process.cwd(),
+                    stdio: ['pipe', 'pipe', 'ignore']
+                  });
+                  const timestamp = parseInt(result.trim());
+                  dates[filePath] = isNaN(timestamp) ? 0 : timestamp;
+                } catch (e) {
+                  // File might not exist in git history, use 0 as fallback
+                  dates[filePath] = 0;
+                }
+              }
+              
+              return dates;
+            };
+            
+            // Get modification dates for all source files
+            // Paths are already in format "backend/src/..." or "frontend/src/..."
+            const allSourceFilePaths = [
+              ...backendSourceFilesCoverage.map(f => f.path),
+              ...frontendSourceFilesCoverage.map(f => f.path)
+            ];
+            
+            const fileModDates = getFileModificationDates(allSourceFilePaths);
+            
+            // Helper to sort files by modification date (most recent first)
+            const sortByModificationDate = (files) => {
+              return files.sort((a, b) => {
+                const dateA = fileModDates[a.path] || 0;
+                const dateB = fileModDates[b.path] || 0;
+                // Most recent first (higher timestamp = more recent)
+                return dateB - dateA;
+              });
+            };
+            
+            // Coverage by Source File (Tested Code)
+            if (backendSourceFilesCoverage.length > 0 || frontendSourceFilesCoverage.length > 0 || frontendData) {
+              comment += `### Coverage by Source File (Tested Code)\n\n`;
+              
+              // Show backend and frontend separately for clarity
+              if (backendSourceFilesCoverage.length > 0) {
+                comment += `#### Backend Source Files (${backendSourceFilesCoverage.length} file${backendSourceFilesCoverage.length > 1 ? 's' : ''})\n\n`;
+                comment += `| Source File Path | Lines | Statements | Branches | Functions |\n`;
+                comment += `|------------------|-------|------------|----------|-----------|\n`;
+                
+                sortByModificationDate(backendSourceFilesCoverage)
+                  .forEach(({ path, lines, statements, branches, functions }) => {
+                    const linesDetail = `${lines.covered}/${lines.total}`;
+                    const statementsDetail = `${statements.covered}/${statements.total}`;
+                    const branchesDetail = `${branches.covered}/${branches.total}`;
+                    const functionsDetail = `${functions.covered}/${functions.total}`;
+                    
+                    comment += `| \`${path}\` | ${lines.pct.toFixed(2)}% (${linesDetail}) | ${statements.pct.toFixed(2)}% (${statementsDetail}) | ${branches.pct.toFixed(2)}% (${branchesDetail}) | ${functions.pct.toFixed(2)}% (${functionsDetail}) |\n`;
+                  });
+                
+                comment += `\n`;
+              }
+              
+              if (frontendSourceFilesCoverage.length > 0) {
+                comment += `#### Frontend Source Files (${frontendSourceFilesCoverage.length} file${frontendSourceFilesCoverage.length > 1 ? 's' : ''})\n\n`;
+                comment += `| Source File Path | Lines | Statements | Branches | Functions |\n`;
+                comment += `|------------------|-------|------------|----------|-----------|\n`;
+                
+                sortByModificationDate(frontendSourceFilesCoverage)
+                  .forEach(({ path, lines, statements, branches, functions }) => {
+                    const linesDetail = `${lines.covered}/${lines.total}`;
+                    const statementsDetail = `${statements.covered}/${statements.total}`;
+                    const branchesDetail = `${branches.covered}/${branches.total}`;
+                    const functionsDetail = `${functions.covered}/${functions.total}`;
+                    
+                    comment += `| \`${path}\` | ${lines.pct.toFixed(2)}% (${linesDetail}) | ${statements.pct.toFixed(2)}% (${statementsDetail}) | ${branches.pct.toFixed(2)}% (${branchesDetail}) | ${functions.pct.toFixed(2)}% (${functionsDetail}) |\n`;
+                  });
+                
+                comment += `\n`;
+              } else if (frontendData) {
+                // Debug: Show that frontend data exists but no source files were found
+                comment += `#### Frontend Source Files\n\n`;
+                comment += `*No source files found in frontend coverage data. Debug info: ${Object.keys(frontendData).length} keys in coverage data.*\n\n`;
+              }
+            }
+            
+            // Overall Coverage Summary
+            comment += `### Overall Coverage Summary\n\n`;
+            
+            // Backend Coverage
+            if (backendTotal) {
+              comment += `#### Backend Coverage\n\n`;
+              comment += `| Metric | Coverage |\n`;
+              comment += `|--------|----------|\n`;
+              comment += `| Statements | ${formatPct(backendTotal.statements.pct)} |\n`;
+              comment += `| Branches | ${formatPct(backendTotal.branches.pct)} |\n`;
+              comment += `| Functions | ${formatPct(backendTotal.functions.pct)} |\n`;
+              comment += `| Lines | ${formatPct(backendTotal.lines.pct)} |\n\n`;
+            }
+            
+            // Frontend Coverage
+            if (frontendTotal) {
+              comment += `#### Frontend Coverage\n\n`;
+              comment += `| Metric | Coverage |\n`;
+              comment += `|--------|----------|\n`;
+              comment += `| Statements | ${formatPct(frontendTotal.statements.pct)} |\n`;
+              comment += `| Branches | ${formatPct(frontendTotal.branches.pct)} |\n`;
+              comment += `| Functions | ${formatPct(frontendTotal.functions.pct)} |\n`;
+              comment += `| Lines | ${formatPct(frontendTotal.lines.pct)} |\n\n`;
+            }
+            
+            // Combined Overall Coverage
+            if (backendTotal && frontendTotal) {
+              const combinedTotal = {
+                statements: {
+                  total: backendTotal.statements.total + frontendTotal.statements.total,
+                  covered: backendTotal.statements.covered + frontendTotal.statements.covered,
+                  pct: ((backendTotal.statements.covered + frontendTotal.statements.covered) / (backendTotal.statements.total + frontendTotal.statements.total)) * 100
+                },
+                branches: {
+                  total: backendTotal.branches.total + frontendTotal.branches.total,
+                  covered: backendTotal.branches.covered + frontendTotal.branches.covered,
+                  pct: ((backendTotal.branches.covered + frontendTotal.branches.covered) / (backendTotal.branches.total + frontendTotal.branches.total)) * 100
+                },
+                functions: {
+                  total: backendTotal.functions.total + frontendTotal.functions.total,
+                  covered: backendTotal.functions.covered + frontendTotal.functions.covered,
+                  pct: ((backendTotal.functions.covered + frontendTotal.functions.covered) / (backendTotal.functions.total + frontendTotal.functions.total)) * 100
+                },
+                lines: {
+                  total: backendTotal.lines.total + frontendTotal.lines.total,
+                  covered: backendTotal.lines.covered + frontendTotal.lines.covered,
+                  pct: ((backendTotal.lines.covered + frontendTotal.lines.covered) / (backendTotal.lines.total + frontendTotal.lines.total)) * 100
+                }
+              };
+              
+              comment += `#### Combined Overall Coverage\n\n`;
+            comment += `| Metric | Coverage |\n`;
+            comment += `|--------|----------|\n`;
+              comment += `| Statements | ${formatPct(combinedTotal.statements.pct)} |\n`;
+              comment += `| Branches | ${formatPct(combinedTotal.branches.pct)} |\n`;
+              comment += `| Functions | ${formatPct(combinedTotal.functions.pct)} |\n`;
+              comment += `| Lines | ${formatPct(combinedTotal.lines.pct)} |\n\n`;
+            }
+            
+            comment += `Full coverage reports available in [workflow artifacts](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`;
+            
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && comment.body.includes('Test Coverage Summary')
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment,
+              });
+            }
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            backend/coverage/
+            frontend/coverage/
+          retention-days: 7

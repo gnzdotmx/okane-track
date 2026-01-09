@@ -1,0 +1,86 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+.env.local
+.env.development
+.env.test
+.env.production
+.env.staging
+
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build outputs
+dist/
+build/
+*/dist/
+*/build/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+data 
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+*.bak
+*.backup
+
+# Docker
+*.pid
+*.seed
+*.pid.lock
+docker-compose.override.yml
+.docker/
+
+# Uploads
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Database
+*.sqlite
+*.db
+
+# Test coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Package manager cache
+.npm
+.yarn
+.pnp
+.pnp.js
+yarn-error.log
+
+# Vite
+.vite/
+vite.config.*.timestamp-*
+
+# Prisma (keep migrations, ignore generated client in node_modules)
+# Note: prisma/migrations/ should be committed
+
+# Data directory (user data)
+data/*
+!data/.gitkeep
