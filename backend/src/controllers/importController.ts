@@ -46,19 +46,11 @@ export class ImportController {
       return;
     }
 
-    if (!accountId) {
-      res.status(400).json({
-        success: false,
-        message: 'Account ID is required',
-      });
-      return;
-    }
-
     // Read file content
     const fs = require('fs');
     const fileContent = fs.readFileSync(file.path, 'utf-8');
 
-    // Import transactions
+    // Import transactions (accountId is optional if CSV contains account information)
     const result = await importService.importCSV(userId, fileContent, accountId);
 
     // Delete uploaded file

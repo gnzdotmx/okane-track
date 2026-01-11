@@ -32,9 +32,7 @@ const Import: React.FC = () => {
     try {
       const response = await api.getAccounts();
       setAccounts(response.data);
-      if (response.data.length > 0) {
-        setSelectedAccount(response.data[0].id);
-      }
+      // Don't auto-select account - let user choose or leave empty for multi-account import
     } catch (err) {
       console.error('Failed to load accounts:', err);
     }
@@ -55,15 +53,16 @@ const Import: React.FC = () => {
   };
 
   const handleImport = async () => {
-    if (!file || !selectedAccount) {
-      setError('Please select a file and account');
+    if (!file) {
+      setError('Please select a file');
       return;
     }
 
     try {
       setLoading(true);
       setError('');
-      const response = await api.importCSV(file, selectedAccount);
+      // accountId is optional - if CSV contains account info, it will be used
+      const response = await api.importCSV(file, selectedAccount || undefined);
       setResult(response.data);
       
       if (response.data.success) {
@@ -100,18 +99,23 @@ const Import: React.FC = () => {
                 Import Transactions
               </Typography>
               <Typography variant="body2" color="text.secondary" paragraph>
-                Upload your CSV file to import transactions. The file should follow the
-                format from your original spreadsheet.
+                Upload your CSV file to import transactions. If your CSV contains account information
+                (Account ID or Account columns), you can import all accounts at once without selecting one.
+                Otherwise, select an account below.
               </Typography>
 
               <TextField
                 select
                 fullWidth
-                label="Select Account"
+                label="Select Account (Optional)"
                 value={selectedAccount}
                 onChange={(e) => setSelectedAccount(e.target.value)}
                 margin="normal"
+                helperText="Leave empty if CSV contains account information"
               >
+                <MenuItem value="">
+                  <em>None (CSV contains account info)</em>
+                </MenuItem>
                 {accounts.map((account) => (
                   <MenuItem key={account.id} value={account.id}>
                     {account.name} ({account.currency.code})
@@ -143,7 +147,7 @@ const Import: React.FC = () => {
                 variant="contained"
                 fullWidth
                 onClick={handleImport}
-                disabled={!file || !selectedAccount || loading}
+                disabled={!file || loading}
                 startIcon={<CloudUpload />}
               >
                 {loading ? 'Importing...' : 'Import Transactions'}
@@ -221,10 +225,13 @@ const Import: React.FC = () => {
                 Your CSV file should have the following columns:
               </Typography>
               <Box component="pre" sx={{ bgcolor: 'grey.100', p: 2, borderRadius: 1, overflow: 'auto' }}>
-                Date, Amount, Type, Description
+                Account ID, Account, Date, Amount, Type, Description, Source/Dest, Reimbursable, Reimb ID, Transaction Type
               </Box>
               <Typography variant="body2" sx={{ mt: 1, mb: 1 }}>
-                <strong>Optional:</strong> Reimbursable (YES/NO) - If not provided, the system will detect reimbursable expenses from the description.
+                <strong>Account columns (Account ID, Account):</strong> Optional - If included, transactions will be imported to the specified accounts. If not included, you must select an account before importing.
+              </Typography>
+              <Typography variant="body2" sx={{ mt: 1, mb: 1 }}>
+                <strong>Other optional columns:</strong> Reimbursable (YES/NO), Reimb ID, Transaction Type - If not provided, the system will detect these from the data.
               </Typography>
               <Typography variant="body2" sx={{ mt: 2 }}>
                 <strong>Example:</strong>

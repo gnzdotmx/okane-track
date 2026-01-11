@@ -1,5 +1,6 @@
 // Mock dependencies - jest.mock() calls are hoisted to the top
 const mockFindById = jest.fn();
+const mockFindAllByUser = jest.fn();
 const mockGetCurrencies = jest.fn();
 const mockGetExpenseTypes = jest.fn();
 const mockGetTransactionTypes = jest.fn();
@@ -9,6 +10,7 @@ jest.mock('../../repositories/accountRepository', () => ({
   __esModule: true,
   default: {
     findById: mockFindById,
+    findAllByUser: mockFindAllByUser,
     getCurrencies: mockGetCurrencies,
     getExpenseTypes: mockGetExpenseTypes,
     getTransactionTypes: mockGetTransactionTypes,
@@ -137,7 +139,72 @@ describe('ImportService', () => {
 
     const mockBudgetCategories = [
       { id: 'category-1', name: 'Food' },
+      { id: 'category-2', name: 'Expenses' },
     ];
+
+    it('should import CSV with account information from CSV', async () => {
+      const parsedTransactions = [
+        {
+          date: '2024-01-15',
+          amount: '100',
+          type: 'Food',
+          description: 'Lunch',
+          transactionType: 'EXPENSE',
+          accountId: 'account-1',
+          accountName: 'Checking Account',
+        },
+      ];
+
+      const mockAccounts = [
+        {
+          id: 'account-1',
+          name: 'Checking Account',
+          userId: 'user-123',
+          currencyId: 'currency-1',
+        },
+      ];
+
+      mockParseUserCSV.mockReturnValue(parsedTransactions);
+      mockFindAllByUser.mockResolvedValue(mockAccounts);
+      // Mock findById for updateAccountBalanceAfterImport (called after import)
+      mockFindById.mockResolvedValue({
+        id: 'account-1',
+        name: 'Checking Account',
+        userId: 'user-123',
+        currencyId: 'currency-1',
+        balance: 0,
+        initialBalance: 0,
+      });
+      mockGetCurrencies.mockResolvedValue(mockCurrencies);
+      mockGetExpenseTypes.mockResolvedValue(mockExpenseTypes);
+      mockGetTransactionTypes.mockResolvedValue(mockTransactionTypes);
+      mockGetBudgetCategories.mockResolvedValue(mockBudgetCategories);
+      mockParseAmount.mockReturnValue(100);
+      mockParseDate.mockReturnValue(new Date('2024-01-15'));
+      mockInferBudgetCategory.mockReturnValue('Expenses');
+      mockIsReimbursableExpense.mockReturnValue(false);
+      mockCreateMany.mockResolvedValue({ count: 1 });
+      mockTransactionFindMany.mockResolvedValue([]);
+      mockUpdateBalance.mockResolvedValue({});
+      mockFindByUserCategoryAndYear.mockResolvedValue(null);
+      mockUpdateBudgetBalance.mockResolvedValue({});
+      mockImportHistoryCreate.mockResolvedValue({ id: 'history-1' });
+
+      const result = await importService.importCSV('user-123', 'CSV content', undefined);
+
+      expect(mockFindAllByUser).toHaveBeenCalledWith('user-123');
+      // findById is called by updateAccountBalanceAfterImport, not for initial account lookup
+      expect(mockFindById).toHaveBeenCalledWith('account-1', 'user-123');
+      expect(result.success).toBe(true);
+      expect(result.successCount).toBe(1);
+      expect(mockCreateMany).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            accountId: 'account-1',
+          }),
+        ])
+      );
+    });
 
     it('should import CSV successfully', async () => {
       const parsedTransactions = [
@@ -174,13 +241,125 @@ describe('ImportService', () => {
       expect(result.errorCount).toBe(0);
     });
 
-    it('should throw error if account not found', async () => {
-      mockParseUserCSV.mockReturnValue([]);
-      mockFindById.mockResolvedValue(null);
+    it('should throw error if account not found when accountId provided', async () => {
+      const parsedTransactions = [
+        {
+          date: '2024-01-15',
+          amount: '100',
+          type: 'Food',
+          description: 'Lunch',
+          transactionType: 'EXPENSE',
+        },
+      ];
+
+      mockParseUserCSV.mockReturnValue(parsedTransactions);
+      mockFindById.mockResolvedValue(null); // Account not found
 
       await expect(importService.importCSV(userId, fileContent, accountId)).rejects.toThrow(
         'Account not found'
       );
+    });
+
+    it('should throw error if account info missing from CSV and no accountId provided', async () => {
+      const parsedTransactions = [
+        {
+          date: '2024-01-15',
+          amount: '100',
+          type: 'Food',
+          description: 'Lunch',
+          transactionType: 'EXPENSE',
+          // No accountId or accountName
+        },
+      ];
+
+      mockParseUserCSV.mockReturnValue(parsedTransactions);
+      mockFindAllByUser.mockResolvedValue([]);
+
+      await expect(importService.importCSV(userId, fileContent, undefined)).rejects.toThrow(
+        'Account ID is required when CSV does not contain account information'
+      );
+    });
+
+    it('should fallback to account name when account ID not found but account name exists', async () => {
+      const parsedTransactions = [
+        {
+          date: '2024-01-15',
+          amount: '100',
+          type: 'Food',
+          description: 'Lunch',
+          transactionType: 'EXPENSE',
+          accountId: 'non-existent-account-id',
+          accountName: 'Checking Account',
+        },
+      ];
+
+      const mockAccounts = [
+        {
+          id: 'account-1',
+          name: 'Checking Account',
+          userId: 'user-123',
+          currencyId: 'currency-1',
+        },
+      ];
+
+      mockParseUserCSV.mockReturnValue(parsedTransactions);
+      mockFindAllByUser.mockResolvedValue(mockAccounts);
+      mockGetCurrencies.mockResolvedValue(mockCurrencies);
+      mockGetExpenseTypes.mockResolvedValue(mockExpenseTypes);
+      mockGetTransactionTypes.mockResolvedValue(mockTransactionTypes);
+      mockGetBudgetCategories.mockResolvedValue(mockBudgetCategories);
+      mockParseAmount.mockReturnValue(100);
+      mockParseDate.mockReturnValue(new Date('2024-01-15'));
+      mockInferBudgetCategory.mockReturnValue('Expenses');
+      mockIsReimbursableExpense.mockReturnValue(false);
+      mockCreateMany.mockResolvedValue({ count: 1 });
+      mockTransactionFindMany.mockResolvedValue([]);
+      mockUpdateBalance.mockResolvedValue({});
+      mockFindById.mockResolvedValue({
+        id: 'account-1',
+        name: 'Checking Account',
+        userId: 'user-123',
+        currencyId: 'currency-1',
+        balance: 0,
+        initialBalance: 0,
+      });
+      mockFindByUserCategoryAndYear.mockResolvedValue(null);
+      mockUpdateBudgetBalance.mockResolvedValue({});
+      mockImportHistoryCreate.mockResolvedValue({ id: 'history-1' });
+
+      const result = await importService.importCSV(userId, fileContent, undefined);
+      expect(result.success).toBe(true);
+      expect(result.successCount).toBe(1);
+      expect(result.errorCount).toBe(0);
+      expect(mockCreateMany).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            accountId: 'account-1', // Should use the account found by name
+          }),
+        ])
+      );
+    });
+
+    it('should throw error if account from CSV not found by ID or name', async () => {
+      const parsedTransactions = [
+        {
+          date: '2024-01-15',
+          amount: '100',
+          type: 'Food',
+          description: 'Lunch',
+          transactionType: 'EXPENSE',
+          accountId: 'non-existent-account-id',
+          accountName: 'Non-existent Account',
+        },
+      ];
+
+      mockParseUserCSV.mockReturnValue(parsedTransactions);
+      mockFindAllByUser.mockResolvedValue([]); // Account not found
+
+      const result = await importService.importCSV(userId, fileContent, undefined);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors[0].message).toContain('Account ID "non-existent-account-id" not found');
+      expect(result.errors[0].message).toContain('account name "Non-existent Account" not found');
     });
 
     it('should handle invalid amount', async () => {
@@ -969,16 +1148,24 @@ describe('ImportService', () => {
   });
 
   describe('exportCSV', () => {
-    it('should export transactions to CSV', async () => {
+    it('should export transactions to CSV with account information', async () => {
       const userId = 'user-123';
       const mockTransactions = [
         {
           id: 'tx-1',
+          accountId: 'account-1',
+          account: { name: 'Checking Account' },
           amount: 100,
           date: new Date('2024-01-15'),
+          expenseType: { name: 'Food' },
+          description: 'Lunch',
+          budgetCategory: { name: 'Expenses' },
+          isReimbursable: false,
+          reimbursementId: '',
+          transactionType: { name: 'EXPENSE' },
         },
       ];
-      const mockCSV = 'CSV content';
+      const mockCSV = 'Account,Account ID,Date,Amount,Type,Description,Source/Dest,Reimbursable,Reimb ID,Transaction Type\nChecking Account,account-1,2024-01-15,100,Food,Lunch,Expenses,NO,,EXPENSE';
 
       mockFindAll.mockResolvedValue(mockTransactions);
       mockExportToCSV.mockReturnValue(mockCSV);
@@ -988,6 +1175,8 @@ describe('ImportService', () => {
       expect(mockFindAll).toHaveBeenCalledWith(userId, undefined);
       expect(mockExportToCSV).toHaveBeenCalledWith(mockTransactions);
       expect(result).toBe(mockCSV);
+      expect(mockCSV).toContain('Account');
+      expect(mockCSV).toContain('Account ID');
     });
 
     it('should export transactions with filters', async () => {

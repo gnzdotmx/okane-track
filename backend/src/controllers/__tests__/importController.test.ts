@@ -228,7 +228,7 @@ describe('ImportController', () => {
       });
     });
 
-    it('should return 400 when accountId is missing', async () => {
+    it('should import CSV without accountId when CSV contains account information', async () => {
       const mockFile = {
         fieldname: 'file',
         originalname: 'transactions.csv',
@@ -241,24 +241,38 @@ describe('ImportController', () => {
         buffer: Buffer.from('test,data'),
       };
 
+      const mockFileContent = 'Account,Account ID,Date,Amount,Type,Description\nChecking Account,account-1,2024-01-01,100,Food,Lunch';
+      const mockImportResult = {
+        success: true,
+        totalRecords: 1,
+        successCount: 1,
+        errorCount: 0,
+        errors: [],
+      };
+
+      mockFs.readFileSync = jest.fn().mockReturnValue(mockFileContent);
+      mockFs.unlinkSync = jest.fn();
+      mockImportService.importCSV.mockResolvedValue(mockImportResult);
+
       const req = createMockRequest({
         file: mockFile,
-        body: {},
+        body: {}, // No accountId provided
       });
       const res = createMockResponse();
 
       importController.import(req, res, jest.fn());
       await waitForAsyncHandler();
 
-      expect(mockImportService.importCSV).not.toHaveBeenCalled();
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({
-        success: false,
-        message: 'Account ID is required',
-      });
+      expect(mockFs.readFileSync).toHaveBeenCalledWith(mockFile.path, 'utf-8');
+      expect(mockImportService.importCSV).toHaveBeenCalledWith(
+        'user-123',
+        mockFileContent,
+        undefined // accountId is optional
+      );
+      expect(res.status).toHaveBeenCalledWith(200);
     });
 
-    it('should return 400 when accountId is empty string', async () => {
+    it('should import CSV with accountId when CSV does not contain account information', async () => {
       const mockFile = {
         fieldname: 'file',
         originalname: 'transactions.csv',
@@ -271,21 +285,34 @@ describe('ImportController', () => {
         buffer: Buffer.from('test,data'),
       };
 
+      const mockFileContent = 'Date,Amount,Type,Description\n2024-01-01,100,Food,Lunch';
+      const mockImportResult = {
+        success: true,
+        totalRecords: 1,
+        successCount: 1,
+        errorCount: 0,
+        errors: [],
+      };
+
+      mockFs.readFileSync = jest.fn().mockReturnValue(mockFileContent);
+      mockFs.unlinkSync = jest.fn();
+      mockImportService.importCSV.mockResolvedValue(mockImportResult);
+
       const req = createMockRequest({
         file: mockFile,
-        body: { accountId: '' },
+        body: { accountId: 'account-123' }, // accountId provided for CSV without account info
       });
       const res = createMockResponse();
 
       importController.import(req, res, jest.fn());
       await waitForAsyncHandler();
 
-      expect(mockImportService.importCSV).not.toHaveBeenCalled();
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({
-        success: false,
-        message: 'Account ID is required',
-      });
+      expect(mockImportService.importCSV).toHaveBeenCalledWith(
+        'user-123',
+        mockFileContent,
+        'account-123'
+      );
+      expect(res.status).toHaveBeenCalledWith(200);
     });
 
     it('should handle file read errors', async () => {
@@ -645,7 +672,7 @@ describe('ImportController', () => {
   });
 
   describe('edge cases', () => {
-    it('should handle accountId as null', async () => {
+    it('should handle accountId as null when CSV has account info', async () => {
       const mockFile = {
         fieldname: 'file',
         originalname: 'transactions.csv',
@@ -658,24 +685,37 @@ describe('ImportController', () => {
         buffer: Buffer.from('test,data'),
       };
 
+      const mockFileContent = 'Account,Account ID,Date,Amount,Type,Description\nChecking Account,account-1,2024-01-01,100,Food,Lunch';
+      const mockImportResult = {
+        success: true,
+        totalRecords: 1,
+        successCount: 1,
+        errorCount: 0,
+        errors: [],
+      };
+
+      mockFs.readFileSync = jest.fn().mockReturnValue(mockFileContent);
+      mockFs.unlinkSync = jest.fn();
+      mockImportService.importCSV.mockResolvedValue(mockImportResult);
+
       const req = createMockRequest({
         file: mockFile,
-        body: { accountId: null },
+        body: { accountId: null }, // null accountId is allowed if CSV has account info
       });
       const res = createMockResponse();
 
       importController.import(req, res, jest.fn());
       await waitForAsyncHandler();
 
-      expect(mockImportService.importCSV).not.toHaveBeenCalled();
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({
-        success: false,
-        message: 'Account ID is required',
-      });
+      expect(mockImportService.importCSV).toHaveBeenCalledWith(
+        'user-123',
+        mockFileContent,
+        null
+      );
+      expect(res.status).toHaveBeenCalledWith(200);
     });
 
-    it('should handle accountId as undefined', async () => {
+    it('should handle import error when account is missing from CSV and accountId not provided', async () => {
       const mockFile = {
         fieldname: 'file',
         originalname: 'transactions.csv',
@@ -688,21 +728,30 @@ describe('ImportController', () => {
         buffer: Buffer.from('test,data'),
       };
 
+      const mockFileContent = 'Date,Amount,Type,Description\n2024-01-01,100,Food,Lunch';
+      const mockImportError = new Error('Account ID is required when CSV does not contain account information');
+
+      mockFs.readFileSync = jest.fn().mockReturnValue(mockFileContent);
+      mockFs.unlinkSync = jest.fn();
+      mockImportService.importCSV.mockRejectedValue(mockImportError);
+
       const req = createMockRequest({
         file: mockFile,
-        body: { accountId: undefined },
+        body: {}, // No accountId and CSV doesn't have account info
       });
       const res = createMockResponse();
+      const next = jest.fn();
 
-      importController.import(req, res, jest.fn());
+      importController.import(req, res, next);
       await waitForAsyncHandler();
 
-      expect(mockImportService.importCSV).not.toHaveBeenCalled();
-      expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({
-        success: false,
-        message: 'Account ID is required',
-      });
+      expect(mockImportService.importCSV).toHaveBeenCalledWith(
+        'user-123',
+        mockFileContent,
+        undefined
+      );
+      // Error should be handled by errorHandler middleware
+      expect(next).toHaveBeenCalled();
     });
 
     it('should handle file as null', async () => {

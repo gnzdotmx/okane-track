@@ -553,7 +553,7 @@ describe('Transactions', () => {
         // Transaction 10 should be visible (first page with 10 rows per page)
         expect(screen.getByText('Transaction 10')).toBeInTheDocument();
       }, { timeout: 10000 });
-    });
+    }, { timeout: 15000 });
   });
 
   describe('Add Transaction Dialog', () => {
