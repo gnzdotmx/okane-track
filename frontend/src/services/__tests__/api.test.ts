@@ -525,13 +525,32 @@ describe('ApiService', () => {
   });
 
   describe('Import/Export endpoints', () => {
-    it('should import CSV file', async () => {
+    it('should import CSV file with accountId', async () => {
       const file = new File(['content'], 'test.csv', { type: 'text/csv' });
       const accountId = 'account-123';
       const mockData = { success: true, data: { imported: 10 } };
       mockAxiosPost.mockResolvedValue({ data: mockData });
 
       const result = await apiService.importCSV(file, accountId);
+
+      expect(mockAxiosPost).toHaveBeenCalledWith(
+        '/data/import',
+        expect.any(FormData),
+        {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+        }
+      );
+      expect(result).toEqual(mockData);
+    });
+
+    it('should import CSV file without accountId when accountId is undefined', async () => {
+      const file = new File(['content'], 'test.csv', { type: 'text/csv' });
+      const mockData = { success: true, data: { imported: 10 } };
+      mockAxiosPost.mockResolvedValue({ data: mockData });
+
+      const result = await apiService.importCSV(file, undefined);
 
       expect(mockAxiosPost).toHaveBeenCalledWith(
         '/data/import',

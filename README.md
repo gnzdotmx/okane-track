@@ -34,6 +34,31 @@ A comprehensive finance management web application featuring multi-currency supp
 - At least 4GB RAM available for Docker
 - Ports 3000, 3001, 54320 available
 
+## Configuration
+
+### Environment Variables
+
+The application uses environment variables for configuration. A `.env.example` file is provided with default values for local development.
+
+1. **Copy the example file:**
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Edit `.env` file** if you need to customize:
+   - `CORS_ORIGIN`: Frontend URL for CORS (default: `http://localhost:3000`)
+   - `VITE_API_URL`: Backend API URL for frontend (default: `http://localhost:3001/api`)
+   - `JWT_SECRET`: Secret key for JWT tokens (change in production!)
+   - Database credentials (defaults work for local development)
+
+   **For remote server deployment**, update:
+   ```env
+   CORS_ORIGIN=http://your-domain.local:3000
+   VITE_API_URL=http://your-domain.local:3001/api
+   ```
+
+3. **The `.env` file is gitignored** - your local configuration won't be committed.
+
 ## Quick Start
 
 ### Option 1: Using Makefile (Recommended)

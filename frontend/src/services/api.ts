@@ -184,10 +184,12 @@ class ApiService {
   }
 
   // Import/Export endpoints
-  async importCSV(file: File, accountId: string) {
+  async importCSV(file: File, accountId?: string) {
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('accountId', accountId);
+    if (accountId) {
+      formData.append('accountId', accountId);
+    }
 
     const response = await this.api.post('/data/import', formData, {
       headers: {

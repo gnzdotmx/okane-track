@@ -15,7 +15,7 @@ import { ImportResult, ImportError } from '../types';
 import logger from '../config/logger';
 
 export class ImportService {
-  async importCSV(userId: string, fileContent: string, accountId: string): Promise<ImportResult> {
+  async importCSV(userId: string, fileContent: string, accountId?: string): Promise<ImportResult> {
     const errors: ImportError[] = [];
     let successCount = 0;
     let errorCount = 0;
@@ -26,25 +26,39 @@ export class ImportService {
 
       logger.info(`Importing ${totalRecords} transactions for user ${userId}`);
 
-      // Get necessary data
-      const [account, currencies, expenseTypes, transactionTypes, budgetCategories] =
+      // Check if CSV contains account information
+      const hasAccountInfo = parsedTransactions.some(tx => tx.accountId || tx.accountName);
+      
+      // Get all accounts for the user if CSV has account info, otherwise get the specified account
+      const [allAccounts, defaultAccount, currencies, expenseTypes, transactionTypes, budgetCategories] =
         await Promise.all([
-          accountRepository.findById(accountId, userId),
+          hasAccountInfo ? accountRepository.findAllByUser(userId) : Promise.resolve([]),
+          accountId ? accountRepository.findById(accountId, userId) : Promise.resolve(null),
           accountRepository.getCurrencies(),
           accountRepository.getExpenseTypes(),
           accountRepository.getTransactionTypes(),
           budgetRepository.getBudgetCategories(),
         ]);
 
-      if (!account) {
+      // If accountId was provided but account not found, throw error
+      if (accountId && !defaultAccount) {
         throw new Error('Account not found');
       }
 
+      // Create account lookup maps (by ID and by name)
+      const accountMapById = new Map(allAccounts.map((a: any) => [a.id, a]));
+      const accountMapByName = new Map(allAccounts.map((a: any) => [a.name.toLowerCase(), a]));
+
+      // If no account info in CSV and no default account provided, throw error
+      if (!hasAccountInfo && !defaultAccount) {
+        throw new Error('Account ID is required when CSV does not contain account information');
+      }
+
       // Create maps for quick lookup
-      const currencyMap = new Map(currencies.map((c) => [c.code, c.id]));
-      const expenseTypeMap = new Map(expenseTypes.map((e) => [e.name, e.id]));
-      const transactionTypeMap = new Map(transactionTypes.map((t) => [t.name, t.id]));
-      const budgetCategoryMap = new Map(budgetCategories.map((b) => [b.name, b.id]));
+      const currencyMap = new Map(currencies.map((c: any) => [c.code, c.id]));
+      const expenseTypeMap = new Map(expenseTypes.map((e: any) => [e.name, e.id]));
+      const transactionTypeMap = new Map(transactionTypes.map((t: any) => [t.name, t.id]));
+      const budgetCategoryMap = new Map(budgetCategories.map((b: any) => [b.name, b.id]));
 
       const transactionsToCreate: any[] = [];
 
@@ -52,6 +66,53 @@ export class ImportService {
         const tx = parsedTransactions[i];
 
         try {
+          // Determine account for this transaction
+          let account = null;
+          if (tx.accountId) {
+            // Look up by account ID from CSV
+            account = accountMapById.get(tx.accountId);
+            // If account ID not found, try falling back to account name
+            if (!account && tx.accountName) {
+              account = accountMapByName.get(tx.accountName.toLowerCase());
+              if (account) {
+                logger.warn(`Account ID ${tx.accountId} not found, but found account by name: ${tx.accountName}`);
+              }
+            }
+            if (!account) {
+              errors.push({
+                row: i + 1,
+                field: 'account',
+                message: `Account ID "${tx.accountId}" not found${tx.accountName ? ` and account name "${tx.accountName}" not found` : ''}. Please ensure the account exists in your account list.`,
+              });
+              errorCount++;
+              continue;
+            }
+          } else if (tx.accountName) {
+            // Look up by account name from CSV
+            account = accountMapByName.get(tx.accountName.toLowerCase());
+            if (!account) {
+              errors.push({
+                row: i + 1,
+                field: 'account',
+                message: `Account name "${tx.accountName}" not found. Please ensure the account exists in your account list.`,
+              });
+              errorCount++;
+              continue;
+            }
+          } else {
+            // Use default account (provided as parameter or from first transaction)
+            account = defaultAccount;
+            if (!account) {
+              errors.push({
+                row: i + 1,
+                field: 'account',
+                message: 'Account information is required in CSV or as parameter',
+              });
+              errorCount++;
+              continue;
+            }
+          }
+
           const amount = parseAmount(tx.amount);
           if (!amount || amount <= 0) {
             errors.push({
@@ -118,7 +179,8 @@ export class ImportService {
             continue;
           }
 
-          const categoryName = inferBudgetCategory(tx.type, tx.description, amount);
+          // Use exported Source/Dest (budget category) if available, otherwise infer
+          const categoryName = tx.sourceDestination || inferBudgetCategory(tx.type, tx.description, amount);
           const budgetCategoryId = budgetCategoryMap.get(categoryName);
           if (!budgetCategoryId) {
             errors.push({
@@ -132,13 +194,14 @@ export class ImportService {
 
           const isReimbursable = tx.reimbursable === 'YES' || 
                                  (tx.reimbursable === undefined && isReimbursableExpense(tx.description));
-          const reimbursementId = isReimbursable
+          // Use exported reimbursement ID if available, otherwise generate new one
+          const reimbursementId = tx.reimbursementId || (isReimbursable
             ? `REIMB-${date.toISOString().slice(0, 7)}-${i.toString().padStart(3, '0')}`
-            : undefined;
+            : undefined);
 
           transactionsToCreate.push({
             userId,
-            accountId,
+            accountId: account.id,
             currencyId: account.currencyId,
             date,
             amount,
@@ -164,7 +227,11 @@ export class ImportService {
         await transactionRepository.createMany(transactionsToCreate);
         logger.info(`Successfully imported ${successCount} transactions`);
 
-        await this.updateAccountBalanceAfterImport(accountId, userId);
+        // Update balances for all affected accounts
+        const affectedAccountIds = new Set(transactionsToCreate.map((tx) => tx.accountId));
+        for (const accId of affectedAccountIds) {
+          await this.updateAccountBalanceAfterImport(accId, userId);
+        }
         
         const affectedCategories = new Set(
           transactionsToCreate.map((tx) => tx.budgetCategoryId)

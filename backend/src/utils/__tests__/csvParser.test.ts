@@ -85,6 +85,37 @@ describe('csvParser', () => {
   });
 
   describe('parseUserCSV', () => {
+    it('should parse CSV with account information', () => {
+      const csvContent = `Account,Account ID,Date,Amount,Type,Description,Source/Dest,Reimbursable,Reimb ID,Transaction Type
+Checking Account,account-1,2024-01-15,100.50,Food,Grocery shopping,Expenses,NO,,EXPENSE`;
+
+      const result = parseUserCSV(csvContent);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toEqual({
+        date: '2024-01-15',
+        amount: '100.50',
+        type: 'Food',
+        description: 'Grocery shopping',
+        sourceDestination: 'Expenses',
+        accountName: 'Checking Account',
+        accountId: 'account-1',
+        transactionType: 'EXPENSE',
+        reimbursable: 'NO',
+      });
+    });
+
+    it('should parse CSV with account name only', () => {
+      const csvContent = `Account,Date,Amount,Type,Description
+Savings Account,2024-01-15,100.50,Food,Grocery shopping`;
+
+      const result = parseUserCSV(csvContent);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].accountName).toBe('Savings Account');
+      expect(result[0].accountId).toBeUndefined();
+    });
+
     it('should parse CSV with Spanish headers', () => {
       const csvContent = `Fecha,Cantidad,Tipo,Descripción
 2024-01-15,100.50,Gastos,Grocery shopping`;
@@ -158,13 +189,39 @@ describe('csvParser', () => {
 
     it('should skip rows with invalid date format', () => {
       const csvContent = `Fecha,Cantidad,Tipo,Descripción
-2024/01/15,100.50,Gastos,Invalid date
+invalid-date,100.50,Gastos,Invalid date
 2024-01-16,200.75,Gastos,Valid date`;
 
       const result = parseUserCSV(csvContent);
 
       expect(result).toHaveLength(1);
       expect(result[0].date).toBe('2024-01-16');
+    });
+
+    it('should parse CSV with Unix timestamps in Date column', () => {
+      // Timestamp for 2024-01-15 00:00:00 UTC in milliseconds
+      const timestamp = '1705276800000';
+      const csvContent = `Account,Account ID,Date,Amount,Type,Description,Source/Dest,Reimbursable,Reimb ID,Transaction Type
+Checking Account,account-1,${timestamp},100.50,Food,Grocery shopping,Expenses,NO,,EXPENSE`;
+
+      const result = parseUserCSV(csvContent);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].date).toBe(timestamp);
+      expect(result[0].accountName).toBe('Checking Account');
+      expect(result[0].accountId).toBe('account-1');
+    });
+
+    it('should parse CSV with mixed date formats (YYYY-MM-DD and timestamps)', () => {
+      const csvContent = `Account,Account ID,Date,Amount,Type,Description,Source/Dest,Reimbursable,Reimb ID,Transaction Type
+Checking Account,account-1,2024-01-15,100.50,Food,Grocery shopping,Expenses,NO,,EXPENSE
+Savings Account,account-2,1705276800000,200.75,Transport,Bus ticket,Expenses,NO,,EXPENSE`;
+
+      const result = parseUserCSV(csvContent);
+
+      expect(result).toHaveLength(2);
+      expect(result[0].date).toBe('2024-01-15');
+      expect(result[1].date).toBe('1705276800000');
     });
 
     it('should skip rows that are header duplicates', () => {
@@ -386,12 +443,50 @@ Fecha,Cantidad,Tipo,Descripción
       expect(parseDate('2024/01/15')).toBeInstanceOf(Date);
       expect(parseDate('01/15/2024')).toBeInstanceOf(Date);
     });
+
+    it('should parse Unix timestamp in milliseconds', () => {
+      // Timestamp for 2024-01-15 00:00:00 UTC in milliseconds
+      const timestamp = '1705276800000';
+      const date = parseDate(timestamp);
+      
+      expect(date).toBeInstanceOf(Date);
+      expect(date?.getFullYear()).toBe(2024);
+      expect(date?.getMonth()).toBe(0); // January is 0
+      expect(date?.getDate()).toBe(15);
+    });
+
+    it('should parse Unix timestamp in seconds (convert to milliseconds)', () => {
+      // Timestamp for 2024-01-15 00:00:00 UTC in seconds
+      const timestamp = '1705276800';
+      const date = parseDate(timestamp);
+      
+      expect(date).toBeInstanceOf(Date);
+      expect(date?.getFullYear()).toBe(2024);
+      expect(date?.getMonth()).toBe(0); // January is 0
+      expect(date?.getDate()).toBe(15);
+    });
+
+    it('should handle timestamp from exported CSV', () => {
+      // Example timestamp from the exported CSV (1767312000000)
+      // This represents a date in 2026, but the exact day may vary by timezone
+      const timestamp = '1767312000000';
+      const date = parseDate(timestamp);
+      
+      expect(date).toBeInstanceOf(Date);
+      expect(date?.getFullYear()).toBe(2026);
+      expect(date?.getMonth()).toBe(0); // January is 0
+      // Verify it's a valid date in January 2026 (day may vary by timezone)
+      expect(date?.getDate()).toBeGreaterThanOrEqual(1);
+      expect(date?.getDate()).toBeLessThanOrEqual(31);
+    });
   });
 
   describe('exportToCSV', () => {
-    it('should export transactions to CSV format', () => {
+    it('should export transactions to CSV format with account information', () => {
       const transactions = [
         {
+          accountId: 'account-1',
+          account: { name: 'Checking Account' },
           date: '2024-01-15',
           amount: 100.5,
           expenseType: { name: 'Food' },
@@ -402,6 +497,8 @@ Fecha,Cantidad,Tipo,Descripción
           transactionType: { name: 'EXPENSE' },
         },
         {
+          accountId: 'account-2',
+          account: { name: 'Savings Account' },
           date: '2024-01-16',
           amount: 200.75,
           expenseType: { name: 'Transport' },
@@ -415,10 +512,16 @@ Fecha,Cantidad,Tipo,Descripción
 
       const result = exportToCSV(transactions);
 
+      expect(result).toContain('Account');
+      expect(result).toContain('Account ID');
       expect(result).toContain('Date');
       expect(result).toContain('Amount');
       expect(result).toContain('Type');
       expect(result).toContain('Description');
+      expect(result).toContain('Checking Account');
+      expect(result).toContain('Savings Account');
+      expect(result).toContain('account-1');
+      expect(result).toContain('account-2');
       expect(result).toContain('2024-01-15');
       expect(result).toContain('2024-01-16');
       expect(result).toContain('Food');
@@ -427,7 +530,7 @@ Fecha,Cantidad,Tipo,Descripción
       expect(result).toContain('NO');
     });
 
-    it('should handle missing optional fields', () => {
+    it('should handle missing optional fields including account', () => {
       const transactions = [
         {
           date: '2024-01-15',
@@ -438,8 +541,56 @@ Fecha,Cantidad,Tipo,Descripción
 
       const result = exportToCSV(transactions);
 
+      expect(result).toContain('Account');
+      expect(result).toContain('Account ID');
       expect(result).toContain('2024-01-15');
       expect(result).toContain('100.5');
+    });
+
+    it('should export account ID from account relation when accountId field is missing', () => {
+      const transactions = [
+        {
+          // accountId field is missing, but account relation has id
+          account: { id: 'account-from-relation', name: 'Checking Account' },
+          date: '2024-01-15',
+          amount: 100.5,
+          expenseType: { name: 'Food' },
+          description: 'Grocery shopping',
+          budgetCategory: { name: 'Expenses' },
+          isReimbursable: false,
+          reimbursementId: '',
+          transactionType: { name: 'EXPENSE' },
+        },
+      ];
+
+      const result = exportToCSV(transactions);
+
+      expect(result).toContain('Account ID');
+      expect(result).toContain('account-from-relation');
+      expect(result).toContain('Checking Account');
+    });
+
+    it('should prefer accountId field over account.id when both are present', () => {
+      const transactions = [
+        {
+          accountId: 'account-from-field',
+          account: { id: 'account-from-relation', name: 'Checking Account' },
+          date: '2024-01-15',
+          amount: 100.5,
+          expenseType: { name: 'Food' },
+          description: 'Grocery shopping',
+          budgetCategory: { name: 'Expenses' },
+          isReimbursable: false,
+          reimbursementId: '',
+          transactionType: { name: 'EXPENSE' },
+        },
+      ];
+
+      const result = exportToCSV(transactions);
+
+      expect(result).toContain('Account ID');
+      expect(result).toContain('account-from-field');
+      expect(result).not.toContain('account-from-relation');
     });
 
     it('should handle empty transactions array', () => {

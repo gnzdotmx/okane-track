@@ -11,6 +11,8 @@ export interface ParsedTransaction {
   reimbursable?: string;
   reimbursementId?: string;
   transactionType?: string;
+  accountName?: string;
+  accountId?: string;
 }
 
 /**
@@ -82,6 +84,26 @@ export const parseUserCSV = (content: string): ParsedTransaction[] => {
       const lower = h.toLowerCase();
       return lower === 'reembolsable' || lower === 'reimbursable';
     });
+    const sourceDestIndex = headerValues.findIndex(h => {
+      const lower = h.toLowerCase();
+      return lower === 'source/dest' || lower === 'source-dest' || lower === 'source_dest';
+    });
+    const transactionTypeIndex = headerValues.findIndex(h => {
+      const lower = h.toLowerCase();
+      return lower === 'transaction type' || lower === 'transactiontype';
+    });
+    const reimbIdIndex = headerValues.findIndex(h => {
+      const lower = h.toLowerCase();
+      return lower === 'reimb id' || lower === 'reimbid' || lower === 'reimbursement id';
+    });
+    const accountNameIndex = headerValues.findIndex(h => {
+      const lower = h.toLowerCase();
+      return lower === 'account';
+    });
+    const accountIdIndex = headerValues.findIndex(h => {
+      const lower = h.toLowerCase();
+      return lower === 'account id' || lower === 'accountid';
+    });
     
     if (fechaIndex === -1 || cantidadIndex === -1 || tipoIndex === -1) {
       throw new Error('CSV must contain Date (or Fecha), Amount (or Cantidad), and Type (or Tipo) columns');
@@ -118,6 +140,11 @@ export const parseUserCSV = (content: string): ParsedTransaction[] => {
       const tipo = values[tipoIndex]?.replace(/"/g, '').trim();
       const descripcion = descripcionIndex !== -1 ? values[descripcionIndex]?.replace(/"/g, '').trim() || '' : '';
       const reembolsable = reembolsableIndex !== -1 ? values[reembolsableIndex]?.replace(/"/g, '').trim().toUpperCase() : '';
+      const sourceDest = sourceDestIndex !== -1 ? values[sourceDestIndex]?.replace(/"/g, '').trim() || '' : '';
+      const transactionType = transactionTypeIndex !== -1 ? values[transactionTypeIndex]?.replace(/"/g, '').trim() || '' : '';
+      const reimbId = reimbIdIndex !== -1 ? values[reimbIdIndex]?.replace(/"/g, '').trim() || '' : '';
+      const accountName = accountNameIndex !== -1 ? values[accountNameIndex]?.replace(/"/g, '').trim() || '' : '';
+      const accountId = accountIdIndex !== -1 ? values[accountIdIndex]?.replace(/"/g, '').trim() || '' : '';
       
       // Skip header row or invalid rows
       const fechaLower = fecha.toLowerCase();
@@ -130,8 +157,10 @@ export const parseUserCSV = (content: string): ParsedTransaction[] => {
         continue;
       }
       
-      // Validate date format (should be YYYY-MM-DD)
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+      // Validate date format - accept YYYY-MM-DD or Unix timestamp (milliseconds or seconds)
+      const isTimestamp = /^\d+$/.test(fecha);
+      const isDateFormat = /^\d{4}-\d{2}-\d{2}$/.test(fecha);
+      if (!isDateFormat && !isTimestamp) {
         continue;
       }
       
@@ -146,28 +175,34 @@ export const parseUserCSV = (content: string): ParsedTransaction[] => {
         isReimbursable = isReimbursableExpense(descripcion) ? 'YES' : 'NO';
       }
       
-      // Determine transaction type based on Type field
-      let transactionType = 'EXPENSE';
-      const tipoLower = tipo.toLowerCase();
-      
-      if (tipoLower === 'ingresos' || tipoLower === 'income') {
-        transactionType = 'INCOME';
-      } else if (
-        tipoLower === 'transfer in' ||
-        tipoLower === 'transferencia entrada' ||
-        tipoLower === 'transferencia in' ||
-        tipoLower === 'account transfer in' ||
-        tipoLower === 'inter-account transfer in' ||
-        (tipoLower.includes('transfer') && tipoLower.includes('in'))
-      ) {
-        transactionType = 'ACCOUNT_TRANSFER_IN';
-      } else if (
-        tipoLower === 'reembolso' ||
-        tipoLower === 'reimbursement' ||
-        tipoLower.includes('reembolso') ||
-        tipoLower.includes('reimbursement')
-      ) {
-        transactionType = 'REIMBURSEMENT';
+      // Determine transaction type: use exported "Transaction Type" if available, otherwise infer from Type field
+      let finalTransactionType = 'EXPENSE';
+      if (transactionType) {
+        // Use the exported transaction type directly
+        finalTransactionType = transactionType.toUpperCase();
+      } else {
+        // Fallback: infer from Type field (for backward compatibility with old CSV formats)
+        const tipoLower = tipo.toLowerCase();
+        
+        if (tipoLower === 'ingresos' || tipoLower === 'income') {
+          finalTransactionType = 'INCOME';
+        } else if (
+          tipoLower === 'transfer in' ||
+          tipoLower === 'transferencia entrada' ||
+          tipoLower === 'transferencia in' ||
+          tipoLower === 'account transfer in' ||
+          tipoLower === 'inter-account transfer in' ||
+          (tipoLower.includes('transfer') && tipoLower.includes('in'))
+        ) {
+          finalTransactionType = 'ACCOUNT_TRANSFER_IN';
+        } else if (
+          tipoLower === 'reembolso' ||
+          tipoLower === 'reimbursement' ||
+          tipoLower.includes('reembolso') ||
+          tipoLower.includes('reimbursement')
+        ) {
+          finalTransactionType = 'REIMBURSEMENT';
+        }
       }
       
       transactions.push({
@@ -175,9 +210,12 @@ export const parseUserCSV = (content: string): ParsedTransaction[] => {
         amount: cantidad,
         type: tipo,
         description: descripcion,
-        sourceDestination: 'Expenses',
+        sourceDestination: sourceDest || 'Expenses', // Use exported Source/Dest if available
         reimbursable: isReimbursable,
-        transactionType: transactionType,
+        transactionType: finalTransactionType,
+        reimbursementId: reimbId || undefined, // Include reimbursement ID if present
+        accountName: accountName || undefined, // Include account name if present
+        accountId: accountId || undefined, // Include account ID if present
       });
     }
     
@@ -220,6 +258,16 @@ export const parseDate = (dateStr: string): Date | null => {
   if (!dateStr) return null;
   
   try {
+    // Handle Unix timestamp (milliseconds or seconds)
+    if (/^\d+$/.test(dateStr.trim())) {
+      const timestamp = parseInt(dateStr.trim(), 10);
+      // If timestamp is in seconds (less than 13 digits), convert to milliseconds
+      const timestampMs = timestamp < 1000000000000 ? timestamp * 1000 : timestamp;
+      const date = new Date(timestampMs);
+      return isNaN(date.getTime()) ? null : date;
+    }
+    
+    // Handle standard date strings (YYYY-MM-DD, ISO format, etc.)
     const date = new Date(dateStr);
     return isNaN(date.getTime()) ? null : date;
   } catch {
@@ -232,6 +280,8 @@ export const parseDate = (dateStr: string): Date | null => {
  */
 export const exportToCSV = (transactions: any[]): string => {
   const records = transactions.map(t => ({
+    Account: t.account?.name || '',
+    'Account ID': t.accountId || t.account?.id || '',
     Date: t.date,
     Amount: t.amount,
     Type: t.expenseType?.name || '',
